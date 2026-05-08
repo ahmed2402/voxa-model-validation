@@ -1,7 +1,10 @@
-# STT
-whisper-live>=0.3.0
+# STT — direct GPU inference via openai-whisper (NOT whisper-live server)
+openai-whisper
 
-# LLM (client only — vLLM server runs separately)
+# Audio loading — numpy<2.0 required; whisper's librosa breaks on numpy 2.x
+numpy<2.0
+
+# LLM client — talks to vLLM's OpenAI-compatible server
 openai>=1.0.0
 
 # TTS
@@ -10,5 +13,5 @@ soundfile
 
 # Utilities
 pyyaml>=6.0
-rich>=13.0.0        # pretty terminal output
-httpx>=0.24.0       # health check pings
+rich>=13.0.0
+httpx>=0.24.0

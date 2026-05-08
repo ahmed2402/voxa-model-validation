@@ -6,7 +6,7 @@ runpod:
 models:
   stt:
     name: "Whisper Turbo"
-    package: "whisper-live"
+    package: "openai-whisper"   # direct GPU inference — no server needed
     port: 9090
     language: "ur"           # Urdu primary
     fallback_language: "en"

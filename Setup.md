@@ -17,8 +17,10 @@
 6. [Run the Bootstrap Script](#6-run-the-bootstrap-script)
 7. [Understanding vLLM — What It Is and How It Works](#7-understanding-vllm--what-it-is-and-how-it-works)
 8. [Test Execution Order — Step by Step](#8-test-execution-order--step-by-step)
+   - [Option A: Guided sequential runner (recommended)](#option-a--guided-sequential-runner-recommended)
+   - [Option B: Manual step-by-step](#option-b--manual-step-by-step)
    - [Model 1: Whisper Turbo (STT)](#model-1-whisper-turbo-stt)
-   - [Model 2: Qwen3.5-9B (LLM)](#model-2-qwen3-8b-llm)
+   - [Model 2: Qwen3.5-9B (LLM)](#model-2-qwen35-9b-llm)
    - [Model 3: VoxCPM2 (TTS)](#model-3-voxcpm2-tts)
    - [Gate 1 Report](#gate-1-report)
 9. [Monitoring GPU During Tests](#9-monitoring-gpu-during-tests)
@@ -34,8 +36,16 @@
 
 **vLLM** is an inference engine for large language models. Think of it as a web server that loads a model into GPU memory and exposes an API endpoint. Your Python test script then calls that API exactly like it would call the OpenAI API — same format, local URL.
 
-**Why separate server + test script?**  
-Loading a 16 GB model into VRAM takes 60–90 seconds. Keeping it as a persistent server means you load once and run all 20 test prompts against it instantly, rather than reloading for every single inference.
+**Why separate server + test script for LLM only?**  
+Loading a 16 GB model into VRAM takes 60–90 seconds. Keeping vLLM as a persistent server means you load once and run all 20 test prompts against it instantly, rather than reloading for every single inference. Whisper and VoxCPM2 are much smaller and load inline in the test scripts directly — no server needed for them.
+
+**Three models, tested sequentially — each fully clears the GPU before the next loads:**
+
+| # | Model | Role | VRAM | How it runs |
+|---|-------|------|------|-------------|
+| 1 | Whisper Turbo | STT | ~2 GB | Inline in test script, single terminal |
+| 2 | Qwen3.5-9B | LLM | ~18 GB | vLLM server (Terminal 1) + test client (Terminal 2) |
+| 3 | VoxCPM2 | TTS | ~4 GB | Inline in test script, single terminal |
 
 ---
 
@@ -68,8 +78,14 @@ You will paste this token into the pod terminal as an environment variable durin
 1. Go to [commonvoice.mozilla.org/ur/datasets](https://commonvoice.mozilla.org/ur/datasets)
 2. Download the Urdu validated clips dataset (the smallest validated set is fine)
 3. Extract and pick **10 short clips** (5–15 seconds each, male and female voices ideally)
-4. Rename them `urdu_01.wav` through `urdu_10.wav`
+4. Any filename is fine — the script picks up all `.wav` files in `data/audio_samples/`
 5. Keep them ready — you will upload them to the pod after connecting
+
+> **Audio format:** Whisper works best with 16 kHz mono WAV. If your clips are stereo or at a different sample rate, convert them locally before uploading:
+> ```bash
+> # Using ffmpeg (install: brew install ffmpeg  or  apt install ffmpeg)
+> ffmpeg -i input.mp3 -ar 16000 -ac 1 output.wav
+> ```
 
 ---
 
@@ -83,13 +99,13 @@ Log in → click **Pods** in the left sidebar → click the blue **+ Deploy** bu
 
 ### Step 2 — Select a Template
 
-You will see a template selector. Search for and select:
+Search for and select:
 
 ```
-RunPod PyTorch 2.1
+RunPod PyTorch 2.4
 ```
 
-This template has CUDA 12.1 and PyTorch pre-installed. Do **not** use the bare Ubuntu template — you would have to install CUDA drivers manually.
+> **Why 2.4 and not 2.1?** Modern vLLM (0.6+) requires CUDA 12.4+. The PyTorch 2.1 template ships with CUDA 12.1 which causes vLLM install failures and `RuntimeError: CUDA error` crashes. The bootstrap script handles the upgrade automatically if you're on 2.1, but starting on 2.4 avoids the problem entirely.
 
 ### Step 3 — Select GPU
 
@@ -110,15 +126,17 @@ Before clicking Deploy, set these storage values:
 | Container Disk | **50 GB** | Qwen3.5-9B weights are ~16 GB; Whisper + VoxCPM2 add ~10 GB more |
 | Volume Disk | 0 GB | Not needed — results will be downloaded before pod termination |
 
-### Step 5 — Set Expose Ports (Optional but Recommended)
+### Step 5 — Set Expose Ports (Optional)
 
 Click **Customize Deployment** → in the **Expose TCP Ports** field add:
 
 ```
-8000, 9090
+8000
 ```
 
-This makes the vLLM (port 8000) and Whisper (port 9090) servers accessible for health checks from your local machine if needed. Not strictly required since tests run inside the pod.
+This makes the vLLM server (port 8000) accessible for health checks from your local machine if needed. Not strictly required since tests run inside the pod.
+
+> Port 9090 is no longer needed — Whisper now runs inline, not as a server.
 
 ### Step 6 — Deploy
 
@@ -130,23 +148,19 @@ Click **Deploy**. The pod will take 1–3 minutes to start. You will see the sta
 
 Once the pod status shows **Running**, click the **Connect** button next to your pod.
 
-You have two options — **use JupyterLab** (easiest for beginners):
-
 ### Option A — JupyterLab (Recommended)
 
 1. Click **Connect to JupyterLab**
 2. A browser tab opens with a file browser and notebook interface
 3. Click **Terminal** (the black square icon) to open a terminal
-4. To open a **second terminal** later (needed for vLLM + test script simultaneously): click the `+` button → Terminal
+4. To open a **second terminal** later (needed for the LLM step only): click the `+` button → Terminal
 
 ### Option B — SSH
-
-If you prefer a direct terminal:
 
 1. Click **Connect via SSH**
 2. Copy the SSH command shown (looks like `ssh root@[ip] -p [port] -i ~/.ssh/id_rsa`)
 3. Paste it in your local terminal
-4. If you get a permission error, you may need to add your SSH public key under RunPod → Settings → SSH Public Keys
+4. If you get a permission error, add your SSH public key under RunPod → Settings → SSH Public Keys
 
 ---
 
@@ -159,7 +173,7 @@ In the pod terminal, run these commands one by one:
 nvidia-smi
 curl -s https://huggingface.co | head -5
 
-# Clone the repo (replace with your actual GitHub URL)
+# Clone the repo
 git clone https://github.com/YOUR_USERNAME/voxa-model-validation.git
 cd voxa-model-validation
 
@@ -174,35 +188,46 @@ huggingface-cli login --token $HF_TOKEN
 
 ## 6. Run the Bootstrap Script
 
-This is the single setup script. It installs all dependencies including vLLM.
+This is the single setup script. Run it once per pod session from the repo root.
 
 ```bash
 bash scripts/00_runpod_setup.sh
 ```
 
-**Expected output (abridged):**
+**What it does (7 steps):**
+
+| Step | Action | Time |
+|------|--------|------|
+| 1 | GPU check (`nvidia-smi`) | instant |
+| 2 | Upgrade pip | ~10 s |
+| 3 | Upgrade PyTorch to 2.4 (CUDA 12.4 wheel) | ~2–3 min |
+| 4 | Install vLLM from PyPI | ~3–5 min |
+| 5 | Install `openai-whisper` + `ffmpeg` + `numpy<2.0` | ~1 min |
+| 6 | Install remaining deps (`openai`, `httpx`, `rich`, `soundfile`, `voxcpm`) | ~30 s |
+| 7 | Create output directories, verify all imports | instant |
+
+**Expected final output:**
 
 ```
-[1/6] Checking GPU visibility...
-+-----------------------------------------------------------------------------+
-| NVIDIA-SMI ...  Driver Version: ...  CUDA Version: 12.1                    |
-...
-[3/6] Installing Python dependencies from requirements.txt...
-...
-[4/6] Installing vLLM (CUDA 12.1 build — this may take 3–5 minutes)...
-...
-[6/6] Verifying key imports...
-Core imports OK
 ========================================
 VOXA Pod Setup Complete
-GPU: NVIDIA GeForce RTX 4090
-VRAM: 24564 MiB
-Python: Python 3.10.x
-Next step: run scripts/01_test_whisper.py
+GPU    : NVIDIA GeForce RTX 4090
+VRAM   : 24564 MiB
+PyTorch: 2.4.0+cu124
+CUDA   : 12.4
+vLLM   : 0.x.x
+
+════════════════════════════════════════
+ SEQUENTIAL TEST ORDER (one at a time):
+════════════════════════════════════════
+
+ ① STT — single terminal, runs fast (~5 min)
+   python scripts/01_test_whisper.py
+ ...
 ========================================
 ```
 
-**vLLM installation takes 3–5 minutes** — this is normal. It is a large package with compiled CUDA extensions.
+> **Why the PyTorch upgrade?** The RunPod PyTorch 2.1 template ships CUDA 12.1. vLLM 0.6+ requires CUDA 12.4+. The bootstrap script upgrades PyTorch to a CUDA 12.4 wheel — this works because RTX 4090 drivers (525+) forward-support CUDA 12.4 binaries even with a CUDA 12.1 container toolkit. Without this step, `pip install vllm` either crashes or installs an old incompatible version.
 
 ---
 
@@ -210,14 +235,14 @@ Next step: run scripts/01_test_whisper.py
 
 You don't need to understand vLLM deeply, but this mental model will help you when things go wrong.
 
-### The Architecture
+### The Architecture (LLM step only)
 
 ```
 Terminal 1 (server)          Terminal 2 (test script)
 ┌────────────────────┐       ┌──────────────────────────┐
 │  vLLM process      │       │  02_test_qwen.py         │
 │                    │       │                          │
-│  Loads Qwen3.5-9B    │       │  wait_for_vllm()         │
+│  Loads Qwen3.5-9B  │       │  wait_for_vllm()         │
 │  into GPU VRAM     │◄──────│  → pings /health         │
 │                    │       │                          │
 │  Listens on        │       │  For each of 20 prompts: │
@@ -228,21 +253,22 @@ Terminal 1 (server)          Terminal 2 (test script)
 └────────────────────┘       └──────────────────────────┘
 ```
 
-### Key Concepts
+Whisper (STT) and VoxCPM2 (TTS) load directly in their test scripts — no separate server process.
 
-| Term | What it means |
+### Key vLLM Flags
+
+| Flag | What it means |
 |------|---------------|
 | `--model` | HuggingFace model ID — vLLM downloads it automatically |
-| `--max-model-len` | Maximum token context window (prompt + response). 8192 = 8K tokens |
-| `--gpu-memory-utilization 0.75` | Reserve 75% of VRAM for the model + KV cache. The remaining 25% (~6 GB) is for overhead. Do NOT set this to 1.0 — the pod will crash |
+| `--dtype half` | Explicit float16 — Qwen3.5-9B fits in 24 GB at fp16 |
+| `--max-model-len 8192` | Maximum token context window (prompt + response) |
+| `--gpu-memory-utilization 0.85` | Reserve 85% of VRAM for weights + KV cache. Do NOT set to 1.0 — the pod will crash with OOM |
 | `--served-model-name qwen3` | The alias the test script uses when calling the API |
 | `--enable-prefix-caching` | Caches repeated parts of the system prompt — speeds up sequential calls |
-| `--trust-remote-code` | Required for Qwen3's custom tokenizer code |
-| KV cache | vLLM's internal cache for attention keys/values during generation |
+| `--trust-remote-code` | Required for Qwen3's tokenizer |
+| `--disable-log-requests` | Suppresses per-request log noise; makes startup message easier to spot |
 
 ### What "Application startup complete" Means
-
-When you run the vLLM server, it prints logs for ~90 seconds. The sequence is:
 
 ```
 Loading model weights...          ← downloading from HuggingFace (~10 min first time)
@@ -262,46 +288,69 @@ The first time you start vLLM with `Qwen/Qwen3.5-9B`, it downloads ~16 GB of wei
 
 ## 8. Test Execution Order — Step by Step
 
-Run models in this exact order. Do not run them simultaneously.
+**Run models in this exact order. Always stop the current model before starting the next — each needs the full 24 GB VRAM.**
+
+### Option A — Guided sequential runner (recommended)
+
+A single script that walks you through all three stages with VRAM checks, pauses at manual steps, and generates the final report:
+
+```bash
+bash scripts/run_sequential_tests.sh
+```
+
+It will pause and wait for your input at the two manual steps (LLM review and TTS scoring). The LLM stage still requires a second terminal for the vLLM server — the script tells you exactly when and what to run.
+
+---
+
+### Option B — Manual step-by-step
+
+Follow the sections below if you prefer to run each piece yourself.
 
 ---
 
 ### Model 1: Whisper Turbo (STT)
 
-**Before you begin:** Upload your 10 Urdu `.wav` files to `data/audio_samples/`.
+**Before you begin:** Upload your Urdu `.wav` files to `data/audio_samples/`.
 
 In JupyterLab, use the upload button in the file browser sidebar to navigate to `data/audio_samples/` and upload the files. Or via terminal:
 ```bash
-# From your local machine (not the pod terminal):
-scp -P [pod-port] urdu_*.wav root@[pod-ip]:~/voxa-model-validation/data/audio_samples/
+# From your local machine:
+scp -P [pod-port] *.wav root@[pod-ip]:~/voxa-model-validation/data/audio_samples/
 ```
 
-**Terminal 1 — Start the Whisper server:**
-```bash
-cd voxa-model-validation
-python -m whisper_live.server --port 9090 --backend faster_whisper
-```
-
-Wait until you see:
-```
-INFO:     Application startup complete.
-```
-
-**Terminal 2 — Run STT tests:**
+**Single terminal — run directly:**
 ```bash
 cd voxa-model-validation
 python scripts/01_test_whisper.py
 ```
 
-The script streams each `.wav` file to the server and records transcripts + latency. Results auto-save to `results/stt_results.json`.
+Whisper Turbo loads directly onto the GPU (~1.5 GB download on first run), transcribes each `.wav` file, and saves results to `results/stt_results.json`. No server process needed.
 
-**When done:** Press `Ctrl+C` in Terminal 1 to stop the Whisper server. This frees ~2 GB VRAM for the next model.
+**What you will see:**
+```
+Device : cuda — NVIDIA GeForce RTX 4090
+Loading Whisper turbo (downloads ~1.5 GB on first run)...
+Model loaded on CUDA.
+
+Transcribing 10 file(s)...
+
+[1/10] urdu_01.wav ...
+  Transcript : السلام علیکم...
+  Language   : ur  |  Latency : 312 ms
+
+...
+
+p95 Latency : 410 ms  (target: < 500 ms)
+Gate passed : YES
+```
+
+When the script finishes, the Whisper model is unloaded automatically — GPU memory is free for the next step.
 
 ---
 
 ### Model 2: Qwen3.5-9B (LLM)
 
-This step uses two terminals simultaneously.
+This step uses **two terminals simultaneously**.
 
 **Terminal 1 — Start the vLLM server:**
 ```bash
@@ -314,7 +363,7 @@ Watch the logs. The first run downloads ~16 GB of weights — this takes time. W
 INFO:     Application startup complete.
 ```
 
-**Terminal 2 — Run LLM tests (open a new terminal in JupyterLab):**
+**Terminal 2 — Run LLM tests:**
 ```bash
 cd voxa-model-validation
 python scripts/02_test_qwen.py
@@ -336,9 +385,23 @@ Running 20 LLM test prompts...
 
 **After the test completes:**
 
-> **[MANUAL]** Open `results/llm_results.json` and review each response against the `pass_criteria` field. Set `"manual_pass": true` or `"manual_pass": false` for each of the 20 entries. This is human judgement — the script cannot do it for you.
+> **[MANUAL]** Open `results/llm_results.json` and review each response against the `pass_criteria` field. Set `"manual_pass": true` or `"manual_pass": false` for each of the 20 entries.
 
-**When done:** Press `Ctrl+C` in Terminal 1 to stop vLLM. This is important — it frees ~18 GB VRAM for the TTS model.
+Quick terminal review:
+```bash
+python -c "
+import json
+records = [json.loads(l) for l in open('results/llm_results.json') if l.strip()]
+for r in records:
+    if r.get('type') == 'aggregate': continue
+    print(f\"\n[{r['test_id']}] {r['category']}\")
+    print(f\"  IN : {r['input'][:80]}\")
+    print(f\"  OUT: {r['output'][:120]}\")
+    print(f\"  CRITERIA: {r['pass_criteria']}\")
+"
+```
+
+**When done:** Press `Ctrl+C` in Terminal 1 to stop vLLM. This frees ~18 GB VRAM for the TTS model. Confirm with `nvidia-smi` that memory usage drops before continuing.
 
 ---
 
@@ -362,11 +425,13 @@ python scripts/03_test_voxcpm2.py --score
 
 The script walks you through entering scores clip by clip.
 
+> **Note:** VoxCPM2 officially supports 30 languages — Urdu is not listed (Hindi is, and shares some phonemes). Expect average scores of 1.5–2.5 / 5.0. If Gate 1 fails for TTS, ElevenLabs Multilingual v2 becomes the mandatory TTS for VOXA.
+
 ---
 
 ### Gate 1 Report
 
-After all three models are tested and LLM results are reviewed:
+After all three models are tested and LLM results are manually reviewed:
 
 ```bash
 python scripts/04_gate1_report.py
@@ -386,7 +451,7 @@ Or in JupyterLab: right-click the `results/` folder → Download as zip.
 
 ## 9. Monitoring GPU During Tests
 
-Open a third terminal and run:
+Open an extra terminal and run:
 
 ```bash
 watch -n 2 nvidia-smi
@@ -400,9 +465,9 @@ This refreshes GPU stats every 2 seconds. Key things to watch:
 | `GPU-Util` | Should spike to 80–100% during inference, drop to near 0% when idle |
 | `Temp` | Normal range 70–85°C under load. Above 90°C is a warning |
 
-If you see an OOM (Out of Memory) error in vLLM:
+If you see an OOM error in vLLM:
 1. Stop the server (`Ctrl+C`)
-2. Lower `--gpu-memory-utilization` to `0.65` in `scripts/02_start_vllm_server.sh`
+2. Lower `--gpu-memory-utilization` to `0.70` in `scripts/02_start_vllm_server.sh`
 3. Restart
 
 ---
@@ -433,55 +498,86 @@ Refresh the RunPod dashboard. The pod status should show **Stopped** (grey, not 
 
 ## 11. Troubleshooting
 
-### `CUDA out of memory` when starting vLLM
-
-The Whisper server may still be running in the background.
-
-```bash
-# Check what is using GPU memory
-nvidia-smi
-# Kill any Python processes that are not the vLLM server
-pkill -f whisper_live
-```
-
-Then restart the vLLM server.
-
----
-
-### vLLM server crashes immediately with `RuntimeError: CUDA error`
-
-The PyTorch version in the container may not match the CUDA driver. Check versions:
-
-```bash
-python -c "import torch; print(torch.version.cuda)"
-nvcc --version
-```
-
-If they don't match, reinstall vLLM with the correct CUDA build:
-
-```bash
-# For CUDA 12.4:
-pip install vllm --extra-index-url https://download.pytorch.org/whl/cu124
-```
-
----
-
-### `ModuleNotFoundError: No module named 'whisper_live'`
+### `ModuleNotFoundError: No module named 'whisper'`
 
 The bootstrap script may have failed partway through. Re-run:
 
 ```bash
-pip install whisper-live>=0.3.0
+pip install openai-whisper "numpy<2.0"
+```
+
+> Do **not** install `whisper-live` — that is a streaming server package, not the inference library. The test script uses `import whisper` which comes from the `openai-whisper` package.
+
+---
+
+### Whisper runs on CPU instead of GPU
+
+The test script checks `torch.cuda.is_available()`. If CUDA is unavailable, it falls back to CPU. Fix:
+
+```bash
+python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
+```
+
+If this prints `False`, the PyTorch install doesn't have CUDA support. Re-run the bootstrap script — specifically step 3 which upgrades PyTorch to the CUDA 12.4 wheel:
+
+```bash
+pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+    --index-url https://download.pytorch.org/whl/cu124
+```
+
+---
+
+### vLLM install fails / `RuntimeError: CUDA error` when starting vLLM
+
+Root cause: PyTorch version in the container doesn't match what vLLM expects.
+
+Check:
+```bash
+python -c "import torch; print('torch:', torch.__version__, '| cuda:', torch.version.cuda)"
+python -c "import vllm; print('vllm:', vllm.__version__)"
+```
+
+Fix — upgrade PyTorch first, then reinstall vLLM:
+```bash
+pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+    --index-url https://download.pytorch.org/whl/cu124
+pip install vllm
+```
+
+> Do **not** add `--extra-index-url https://download.pytorch.org/whl/cu121` when installing vLLM. That is a PyTorch wheel index and has no effect on vLLM — it only confuses the dependency resolver.
+
+---
+
+### `CUDA out of memory` when starting vLLM
+
+A previous model process is still holding GPU memory.
+
+```bash
+# See what is using GPU memory
+nvidia-smi
+
+# Kill lingering Python processes
+pkill -f whisper   # if Whisper didn't unload
+pkill -f vllm      # if a previous vLLM instance crashed without cleanup
+```
+
+Then restart the vLLM server. If OOM persists, lower the memory utilization:
+```bash
+# Edit scripts/02_start_vllm_server.sh
+# Change --gpu-memory-utilization 0.85 to 0.70
 ```
 
 ---
 
 ### Whisper returns empty transcripts for Urdu audio
 
-Whisper Turbo is excellent at Urdu but needs clean audio. Check:
-1. Audio is 16kHz mono (not stereo, not 44.1kHz)
-2. File is not silent or corrupt: `python -c "import soundfile as sf; d,sr=sf.read('data/audio_samples/urdu_01.wav'); print(sr, d.shape)"`
-3. Try forcing the language: open `01_test_whisper.py` and change `language: "ur"` to `language: null` to let Whisper auto-detect
+Check:
+1. Audio is 16 kHz mono (not stereo, not 44.1 kHz):
+   ```bash
+   python -c "import soundfile as sf; d,sr=sf.read('data/audio_samples/urdu_01.wav'); print(sr, d.shape)"
+   ```
+2. File is not silent or corrupt (shape should be non-zero)
+3. Try letting Whisper auto-detect language: open `01_test_whisper.py` and change `language="ur"` to `language=None`
 
 ---
 
@@ -491,29 +587,25 @@ Whisper Turbo is excellent at Urdu but needs clean audio. Check:
 huggingface-cli login --token hf_your_token_here
 ```
 
-Qwen3.5-9B is not a gated model so it should not require authentication, but having a token avoids rate limits.
+Qwen3.5-9B is not a gated model so authentication is not strictly required, but a token avoids rate limiting on large downloads.
 
 ---
 
 ### `Connection refused` when the test script tries to reach vLLM
 
-The server is either not started or still loading. Check Terminal 1 for `Application startup complete`. If the server crashed, read the error — 99% of the time it's an OOM error (see above).
+The server is either not started or still loading. Check Terminal 1 for `Application startup complete`. The test script waits up to 120 seconds — if it times out, the server likely crashed (read the error in Terminal 1).
 
 ---
 
 ### JupyterLab terminal disconnects mid-test
 
-Long-running processes can disconnect if the browser goes idle. Two mitigations:
-
-1. Use `tmux` to run the server in a persistent session:
-   ```bash
-   tmux new -s vllm
-   bash scripts/02_start_vllm_server.sh
-   # Detach with Ctrl+B then D
-   # Reattach later with: tmux attach -t vllm
-   ```
-
-2. Or simply keep the browser tab active.
+Use `tmux` to run the vLLM server in a persistent session:
+```bash
+tmux new -s vllm
+bash scripts/02_start_vllm_server.sh
+# Detach: Ctrl+B then D
+# Reattach later: tmux attach -t vllm
+```
 
 ---
 
@@ -526,31 +618,30 @@ The following steps **cannot be automated** and require your direct action:
 ### MANUAL 1 — RunPod account creation and credit top-up
 **When:** Before anything else  
 **What:** Create a RunPod account at runpod.io, add at least $10 in credits  
-**Why I can't do it:** Requires payment information and account creation on an external website
+**Why:** Requires payment information and account creation on an external website
 
 ---
 
 ### MANUAL 2 — HuggingFace token generation
 **When:** Before pod setup  
 **What:** Generate a Read token at huggingface.co → Settings → Access Tokens  
-**Why I can't do it:** Requires logging into your HuggingFace account
+**Why:** Requires logging into your HuggingFace account
 
 ---
 
 ### MANUAL 3 — Pod deployment on RunPod
 **When:** Start of session  
 **What:** Click through the RunPod UI to create the pod (Section 3 above)  
-**Why I can't do it:** Requires navigating the RunPod web dashboard
+**Why:** Requires navigating the RunPod web dashboard
 
 ---
 
 ### MANUAL 4 — Upload Urdu audio files
 **When:** Before running `01_test_whisper.py`  
-**What:** Download 10 Urdu clips from Mozilla Common Voice, convert to 16kHz mono WAV if needed, upload to `data/audio_samples/` on the pod  
-**Why I can't do it:** Audio files must come from you; the pod doesn't have an internet download path to Common Voice without auth  
+**What:** Upload your `.wav` files to `data/audio_samples/` on the pod  
+**Why:** Audio files must come from you  
 **Audio conversion if needed (run locally):**
 ```bash
-# Using ffmpeg (install with: brew install ffmpeg  or  apt install ffmpeg)
 ffmpeg -i input.mp3 -ar 16000 -ac 1 output.wav
 ```
 
@@ -558,31 +649,17 @@ ffmpeg -i input.mp3 -ar 16000 -ac 1 output.wav
 
 ### MANUAL 5 — LLM response review
 **When:** After `02_test_qwen.py` completes  
-**What:** Open `results/llm_results.json`, read each of the 20 model responses, and set `"manual_pass": true` or `"manual_pass": false` based on the `pass_criteria` field  
-**Why I can't do it:** This is subjective judgement — did the model actually respond in Urdu? Did it de-escalate correctly? Only a human can judge.  
+**What:** Open `results/llm_results.json`, read each of the 20 model responses, set `"manual_pass": true` or `"manual_pass": false` based on the `pass_criteria` field  
+**Why:** Subjective judgement — did the model respond in Urdu? Did it de-escalate correctly? Only a human can judge.  
 **Time estimate:** 15–20 minutes
-
-A quick way to review in the terminal:
-```bash
-python -c "
-import json
-records = [json.loads(l) for l in open('results/llm_results.json') if l.strip()]
-for r in records:
-    if r.get('type') == 'aggregate': continue
-    print(f\"\n[{r['test_id']}] {r['category']}\")
-    print(f\"  IN : {r['input'][:80]}\")
-    print(f\"  OUT: {r['output'][:120]}\")
-    print(f\"  CRITERIA: {r['pass_criteria']}\")
-"
-```
 
 ---
 
 ### MANUAL 6 — TTS naturalness scoring
 **When:** After `03_test_voxcpm2.py` generates audio  
 **What:** Share `results/tts_audio/` with 3 native Urdu speakers, collect their 1–5 scores for each of the 10 clips  
-**Why I can't do it:** Requires human native-speaker judgement on Urdu phoneme naturalness  
-**Time estimate:** 30–60 minutes (scheduling native speaker listeners)  
+**Why:** Requires human native-speaker judgement on Urdu phoneme naturalness  
+**Time estimate:** 30–60 minutes  
 **Download the audio folder to your local machine first:**
 ```bash
 # From your local machine:
@@ -594,7 +671,7 @@ scp -P [pod-port] -r root@[pod-ip]:~/voxa-model-validation/results/tts_audio/ ./
 ### MANUAL 7 — Pod termination
 **When:** Immediately after downloading results  
 **What:** Go to RunPod dashboard → stop the pod  
-**Why I can't do it:** Requires clicking in the RunPod web dashboard  
+**Why:** Requires clicking in the RunPod web dashboard  
 **This is the highest-stakes manual step — forgetting it costs money every minute**
 
 ---
