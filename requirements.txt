@@ -1,4 +1,5 @@
 # STT — direct GPU inference via openai-whisper (NOT whisper-live server)
+# PyPI package: openai-whisper   imports as: import whisper   (NOT pip install whisper — wrong package)
 openai-whisper
 
 # Audio loading — numpy<2.0 required; whisper's librosa breaks on numpy 2.x

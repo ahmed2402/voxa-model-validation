@@ -15,7 +15,7 @@ GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
 VRAM_MIB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader | head -1)
 DRIVER_CUDA=$(nvidia-smi | grep -oP "CUDA Version: \K[0-9]+\.[0-9]+" | head -1)
 
-# Build wheel tag: "12.8" → "cu128", "12.4" → "cu124", etc.
+# Build wheel tag: "12.8" → "cu128", "13.0" → "cu130"
 CUDA_TAG=$(echo "$DRIVER_CUDA" | tr -d '.')
 CUDA_TAG="cu${CUDA_TAG}"
 
@@ -24,36 +24,34 @@ echo "GPU        : $GPU_NAME"
 echo "VRAM       : $VRAM_MIB"
 echo "Driver CUDA: $DRIVER_CUDA  (wheel tag: $CUDA_TAG)"
 
-# ── Step 2: Upgrade pip ───────────────────────────────────────────────────────
+# ── Step 2: Upgrade pip + install uv ─────────────────────────────────────────
+# uv is vLLM's recommended installer — it supports --torch-backend which
+# lets us pin the CUDA wheel variant (e.g. cu128) independently of vLLM version.
 echo ""
-echo "[2/6] Updating pip..."
-pip install --upgrade pip --quiet
+echo "[2/6] Updating pip and installing uv..."
+pip install --upgrade pip uv --quiet
 
-# ── Step 3: Install vLLM ──────────────────────────────────────────────────────
-# Install vLLM FIRST — it declares the exact torch version it requires.
-# We resolve that requirement in step 4 using the correct CUDA wheel index.
-# Do NOT pre-install a specific torch version before this step; doing so
-# causes a downgrade conflict (e.g. 2.4.0 → 2.11.0) that leaves torch broken.
+# ── Step 3: Install vLLM with the correct torch CUDA backend ──────────────────
+# Using uv + --torch-backend avoids the mismatch between vLLM's default
+# torch wheel (e.g. cu130) and the pod's actual driver CUDA support.
+# This installs the latest vLLM with a torch build matching the driver.
 echo ""
-echo "[3/6] Installing vLLM..."
-pip install vllm --quiet
+echo "[3/6] Installing vLLM with torch backend $CUDA_TAG..."
+# vLLM 0.20.0 was the first release compiled against CUDA 13.0 (libcudart.so.13).
+# Pods with driver CUDA <= 12.8 must use < 0.20.0 which is compiled against CUDA 12.x.
+uv pip install "vllm<0.20.0" --torch-backend="$CUDA_TAG"
+
 VLLM_VER=$(python -c "import vllm; print(vllm.__version__)")
 echo "  vLLM $VLLM_VER installed"
 
-# ── Step 4: Install torch with correct CUDA wheel ─────────────────────────────
-# pip resolves vLLM's pinned torch requirement (e.g. torch==2.11.0) while
-# fetching CUDA-enabled wheels from PyTorch's index for this driver's CUDA.
-# This handles any template version (2.1, 2.4, etc.) without hardcoding.
+# ── Step 4: Verify torch + CUDA ───────────────────────────────────────────────
 echo ""
-echo "[4/6] Installing torch with $CUDA_TAG wheels (satisfies vLLM's torch constraint)..."
-pip install "torch" "torchvision" "torchaudio" \
-    --index-url "https://download.pytorch.org/whl/${CUDA_TAG}" \
-    --upgrade --quiet
-
+echo "[4/6] Verifying PyTorch + CUDA..."
 python -c "
 import torch
-assert torch.cuda.is_available(), 'CUDA not available — check driver or wheel tag'
-print(f'  torch {torch.__version__} | CUDA {torch.version.cuda}')
+assert torch.cuda.is_available(), 'CUDA not available — driver/wheel mismatch'
+print(f'  torch  {torch.__version__}')
+print(f'  CUDA   {torch.version.cuda}')
 print(f'  Device: {torch.cuda.get_device_name(0)}')
 print(f'  VRAM  : {torch.cuda.get_device_properties(0).total_memory // 1024**2} MiB')
 "
@@ -62,11 +60,13 @@ print(f'  VRAM  : {torch.cuda.get_device_properties(0).total_memory // 1024**2} 
 # openai-whisper = direct GPU inference library (import whisper).
 # whisper-live   = streaming server package — NOT used here.
 # ffmpeg binary  = required by whisper for audio decoding.
+# apt-get update is required first — package lists are stale on fresh pods.
 echo ""
 echo "[5/6] Installing openai-whisper + ffmpeg..."
 apt-get update -qq && apt-get install -y -q ffmpeg || \
     conda install -c conda-forge ffmpeg -y 2>/dev/null || \
     echo "  WARNING: ffmpeg not installed — audio transcription will fail"
+
 pip install "openai-whisper" "numpy<2.0" --quiet
 python -c "import whisper; print('  openai-whisper OK')"
 
@@ -88,7 +88,7 @@ python -c "
 import torch, whisper, vllm, yaml, rich, openai, httpx, soundfile
 print(f'  torch  {torch.__version__} | CUDA: {torch.cuda.is_available()} | {torch.cuda.get_device_name(0)}')
 print(f'  vLLM   {vllm.__version__}')
-print('  All imports OK')
+print('  All imports OK — ready to test')
 "
 
 # ── Summary ───────────────────────────────────────────────────────────────────

@@ -41,4 +41,4 @@ python -m vllm.entrypoints.openai.api_server \
     --host 0.0.0.0 \
     --enable-prefix-caching \
     --trust-remote-code \
-    --disable-log-requests
+    --no-enable-log-requests
