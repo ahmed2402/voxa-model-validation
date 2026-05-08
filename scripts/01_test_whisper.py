@@ -1,34 +1,11 @@
-"""STT validation — Whisper Turbo via faster-whisper (GPU, direct inference)."""
-
-# ── CUDA library path fix ────────────────────────────────────────────────────
-# vLLM installs CUDA 13 pip packages whose .so files sit outside the default
-# LD_LIBRARY_PATH. We collect every nvidia/*/lib path + system CUDA paths and
-# re-exec once so the dynamic linker picks them up before ctranslate2 loads.
-import os, sys
-
-if os.environ.get("_CUDA_PATHS_SET") != "1":
-    import site
-    cuda_paths = []
-    nvidia_base = os.path.join(site.getsitepackages()[0], "nvidia")
-    if os.path.isdir(nvidia_base):
-        for pkg in sorted(os.listdir(nvidia_base)):
-            lib = os.path.join(nvidia_base, pkg, "lib")
-            if os.path.isdir(lib):
-                cuda_paths.append(lib)
-    for p in ["/usr/local/cuda/lib64", "/usr/local/cuda-12.1/lib64",
-              "/usr/local/cuda-12.4/lib64", "/usr/lib/x86_64-linux-gnu"]:
-        if os.path.isdir(p):
-            cuda_paths.append(p)
-    existing = os.environ.get("LD_LIBRARY_PATH", "")
-    os.environ["LD_LIBRARY_PATH"] = ":".join(cuda_paths) + (":" + existing if existing else "")
-    os.environ["_CUDA_PATHS_SET"] = "1"
-    os.execv(sys.executable, [sys.executable] + sys.argv)
-# ────────────────────────────────────────────────────────────────────────────
+"""STT validation — Whisper Turbo via openai-whisper + PyTorch (GPU)."""
 
 import json
+import sys
 import time
 from pathlib import Path
 
+import torch
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -52,20 +29,17 @@ def main() -> None:
     if not wav_files:
         print(
             "\nNo audio files found in data/audio_samples/\n"
-            "Add .wav files (16kHz mono recommended) then re-run.\n"
+            "Add .wav files then re-run.\n"
         )
         sys.exit(0)
 
-    print("Loading Whisper Turbo on GPU (downloads ~1.5 GB on first run)...")
-    try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel("turbo", device="cuda", compute_type="float16")
-        print("Model loaded on GPU.\n")
-    except Exception as exc:
-        print(f"GPU load failed ({exc})\nFalling back to CPU / int8 ...")
-        from faster_whisper import WhisperModel
-        model = WhisperModel("turbo", device="cpu", compute_type="int8")
-        print("Model loaded on CPU.\n")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device : {device} — {torch.cuda.get_device_name(0) if device == 'cuda' else 'CPU'}")
+    print("Loading Whisper turbo (downloads ~1.5 GB on first run)...")
+
+    import whisper
+    model = whisper.load_model("turbo", device=device)
+    print(f"Model loaded on {device.upper()}.\n")
 
     logger = ResultLogger(
         model_name="Whisper Turbo",
@@ -78,24 +52,24 @@ def main() -> None:
         print(f"[{i}/{len(wav_files)}] {wav_path.name} ...")
         start = time.monotonic()
         try:
-            segments, info = model.transcribe(
+            result = model.transcribe(
                 str(wav_path),
                 language="ur",
-                beam_size=5,
-                vad_filter=True,
+                fp16=(device == "cuda"),
+                verbose=False,
             )
-            transcript = " ".join(seg.text for seg in segments).strip()
+            transcript = result["text"].strip()
+            lang_detected = result.get("language", "ur")
             latency_ms = int((time.monotonic() - start) * 1000)
-            lang_detected = info.language
             status = "pass" if transcript else "empty"
         except Exception as exc:
             transcript = ""
-            latency_ms = 9999
             lang_detected = "error"
+            latency_ms = 9999
             status = f"error: {exc}"
 
         print(f"  Transcript : {transcript[:100] or '(empty)'}")
-        print(f"  Language   : {lang_detected}  |  Latency: {latency_ms} ms\n")
+        print(f"  Language   : {lang_detected}  |  Latency : {latency_ms} ms\n")
 
         logger.log(
             test_id=f"stt_{i:02d}",
