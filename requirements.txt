@@ -1,0 +1,14 @@
+# STT
+whisper-live>=0.3.0
+
+# LLM (client only — vLLM server runs separately)
+openai>=1.0.0
+
+# TTS
+voxcpm
+soundfile
+
+# Utilities
+pyyaml>=6.0
+rich>=13.0.0        # pretty terminal output
+httpx>=0.24.0       # health check pings

@@ -1,0 +1,41 @@
+runpod:
+  gpu: "RTX 4090"
+  vram_gb: 24
+  billing: "per-second"  # terminate pod immediately after testing
+
+models:
+  stt:
+    name: "Whisper Turbo"
+    package: "whisper-live"
+    port: 9090
+    language: "ur"           # Urdu primary
+    fallback_language: "en"
+
+  llm:
+    name: "Qwen3.5-9B"
+    hf_id: "Qwen/Qwen3.5-9B"
+    port: 8000
+    max_model_len: 8192
+    gpu_memory_utilization: 0.85   # fp16 weights ~18 GB; leaves ~3.6 GB for KV cache
+    temperature: 0.7               # Qwen3 recommended default for non-thinking mode
+    max_tokens: 300
+    enable_thinking: false         # /no_think keeps responses fast for customer service
+
+  tts:
+    name: "VoxCPM2"
+    hf_id: "openbmb/VoxCPM2"
+    package: "voxcpm"
+    load_denoiser: false        # saves ~2 GB VRAM during testing
+    cfg_value: 2.0
+    inference_timesteps: 10
+    output_dir: "results/tts_audio"
+
+gate1:
+  tts_naturalness_threshold: 3.0   # average score from 3 native speakers
+  llm_pass_rate_threshold: 0.80    # 16 of 20 prompts must pass
+  stt_target_latency_ms: 500       # p95 STT latency target
+
+test_prompts:
+  llm_total: 20
+  tts_sentences: 10
+  stt_audio_clips: 10

@@ -1,0 +1,9 @@
+results/tts_audio/
+*.wav
+*.mp3
+__pycache__/
+.env
+*.pyc
+results/*.json
+!results/.gitkeep
+venv/
