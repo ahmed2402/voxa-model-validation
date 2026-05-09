@@ -31,6 +31,10 @@ if [ "${USED_MIB:-0}" -gt 2000 ]; then
     echo ""
 fi
 
+# XET is HuggingFace's newer chunked transfer protocol — it fails on some pods.
+# Disabling it forces the standard HTTP download which is more reliable.
+export HF_HUB_DISABLE_XET=1
+
 python -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen3.5-9B \
     --dtype half \
